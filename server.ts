@@ -1316,24 +1316,46 @@ app.post('/api/scan-subnet', async (req, res) => {
 });
 
 // --- SYSTEM GIT / SELF-UPDATE API (1-CLICK UPDATE WITHOUT DATA LOSS) ---
+function getGitCmd(): string {
+  try {
+    execSync('git --version', { encoding: 'utf-8', timeout: 3000 });
+    return 'git';
+  } catch (_e) {
+    if (process.platform === 'win32') {
+      const winCandidates = [
+        'C:\\Program Files\\Git\\cmd\\git.exe',
+        'C:\\Program Files (x86)\\Git\\cmd\\git.exe',
+        path.join(process.env.LOCALAPPDATA || '', 'Programs\\Git\\cmd\\git.exe')
+      ];
+      for (const candidate of winCandidates) {
+        if (candidate && fs.existsSync(candidate)) {
+          return `"${candidate}"`;
+        }
+      }
+    }
+    return 'git';
+  }
+}
+
 app.get('/api/system/update-info', (_req, res) => {
   try {
+    const gitCmd = getGitCmd();
     const gitDirExists = fs.existsSync(path.join(process.cwd(), '.git'));
-    let remoteUrl = (settings as any).gitRepoUrl || '';
+    let remoteUrl = (settings as any).gitRepoUrl || 'https://github.com/suphol4726/eboard-monitor.git';
     let currentBranch = 'main';
     let lastCommit = '';
 
     if (gitDirExists) {
       try {
-        const remoteOut = execSync('git remote get-url origin', { encoding: 'utf-8', timeout: 3000 }).trim();
+        const remoteOut = execSync(`${gitCmd} remote get-url origin`, { encoding: 'utf-8', timeout: 3000 }).trim();
         if (remoteOut) remoteUrl = remoteOut;
       } catch (_e) {}
       try {
-        const branchOut = execSync('git rev-parse --abbrev-ref HEAD', { encoding: 'utf-8', timeout: 3000 }).trim();
+        const branchOut = execSync(`${gitCmd} rev-parse --abbrev-ref HEAD`, { encoding: 'utf-8', timeout: 3000 }).trim();
         if (branchOut) currentBranch = branchOut;
       } catch (_e) {}
       try {
-        const commitOut = execSync('git log -1 --format="%h - %s (%cr)"', { encoding: 'utf-8', timeout: 3000 }).trim();
+        const commitOut = execSync(`${gitCmd} log -1 --format="%h - %s (%cr)"`, { encoding: 'utf-8', timeout: 3000 }).trim();
         if (commitOut) lastCommit = commitOut;
       } catch (_e) {}
     }
@@ -1365,7 +1387,8 @@ app.post('/api/system/self-update', async (req, res) => {
   const backupLogs = [...logs];
 
   try {
-    const targetRepo = (repoUrl || (settings as any).gitRepoUrl || '').trim();
+    const gitCmd = getGitCmd();
+    const targetRepo = (repoUrl || (settings as any).gitRepoUrl || 'https://github.com/suphol4726/eboard-monitor.git').trim();
     if (targetRepo) {
       (settings as any).gitRepoUrl = targetRepo;
       writeJsonAtomicSync(SETTINGS_FILE, settings);
@@ -1378,14 +1401,14 @@ app.post('/api/system/self-update', async (req, res) => {
           error: 'ยังไม่ได้ผูก GitHub Repository URL กรุณาวางลิงก์ GitHub Repo ของโปรเจกต์นี้ในช่องด้านบนก่อนกดอัปเดต'
         });
       }
-      execSync('git init', { encoding: 'utf-8', timeout: 10000 });
-      execSync(`git remote add origin "${targetRepo}"`, { encoding: 'utf-8', timeout: 10000 });
+      execSync(`${gitCmd} init`, { encoding: 'utf-8', timeout: 10000 });
+      execSync(`${gitCmd} remote add origin "${targetRepo}"`, { encoding: 'utf-8', timeout: 10000 });
     } else if (targetRepo) {
       try {
-        execSync(`git remote set-url origin "${targetRepo}"`, { encoding: 'utf-8', timeout: 10000 });
+        execSync(`${gitCmd} remote set-url origin "${targetRepo}"`, { encoding: 'utf-8', timeout: 10000 });
       } catch (_e) {
         try {
-          execSync(`git remote add origin "${targetRepo}"`, { encoding: 'utf-8', timeout: 10000 });
+          execSync(`${gitCmd} remote add origin "${targetRepo}"`, { encoding: 'utf-8', timeout: 10000 });
         } catch (_e2) {}
       }
     }
@@ -1393,7 +1416,7 @@ app.post('/api/system/self-update', async (req, res) => {
     // Verify remote origin exists
     let activeRemote = '';
     try {
-      activeRemote = execSync('git remote get-url origin', { encoding: 'utf-8', timeout: 5000 }).trim();
+      activeRemote = execSync(`${gitCmd} remote get-url origin`, { encoding: 'utf-8', timeout: 5000 }).trim();
     } catch (_e) {}
 
     if (!activeRemote) {
@@ -1403,18 +1426,18 @@ app.post('/api/system/self-update', async (req, res) => {
     }
 
     console.log(`[Self-Update] Fetching latest code from ${activeRemote}...`);
-    execSync('git fetch --all', { encoding: 'utf-8', timeout: 60000 });
+    execSync(`${gitCmd} fetch --all`, { encoding: 'utf-8', timeout: 60000 });
 
     // Determine remote default branch (main or master)
     let branch = 'main';
     try {
-      const branches = execSync('git branch -r', { encoding: 'utf-8', timeout: 5000 });
+      const branches = execSync(`${gitCmd} branch -r`, { encoding: 'utf-8', timeout: 5000 });
       if (!branches.includes('origin/main') && branches.includes('origin/master')) {
         branch = 'master';
       }
     } catch (_e) {}
 
-    execSync(`git reset --hard origin/${branch}`, { encoding: 'utf-8', timeout: 30000 });
+    execSync(`${gitCmd} reset --hard origin/${branch}`, { encoding: 'utf-8', timeout: 30000 });
 
     // Restore preserved data files immediately so local devices, settings, and logs are never lost
     writeJsonAtomicSync(DEVICES_FILE, backupDevices);
@@ -1422,6 +1445,12 @@ app.post('/api/system/self-update', async (req, res) => {
     writeJsonAtomicSync(LOGS_FILE, backupLogs);
 
     console.log('[Self-Update] Installing dependencies & building production bundle...');
+    try {
+      const oldServerBundle = path.join(process.cwd(), 'dist', 'server.cjs');
+      if (fs.existsSync(oldServerBundle)) {
+        fs.unlinkSync(oldServerBundle);
+      }
+    } catch (_e) {}
     execSync('npm install --no-audit --no-fund', { encoding: 'utf-8', timeout: 180000 });
     execSync('npm run build', { encoding: 'utf-8', timeout: 180000 });
 
@@ -4426,6 +4455,28 @@ async function startServer() {
         if (req.originalUrl.startsWith('/api')) return res.status(404).json({ error: 'API not found' });
         res.sendFile(path.join(distPath, 'index.html'));
       });
+    }
+
+    if (process.platform === 'win32') {
+      try {
+        const netstatOut = execSync(`netstat -aon | findstr :${PORT} | findstr LISTENING`, {
+          encoding: 'utf-8',
+          timeout: 5000
+        });
+        const lines = netstatOut.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+        for (const line of lines) {
+          const parts = line.split(/\s+/);
+          const pid = parseInt(parts[parts.length - 1], 10);
+          if (pid && !isNaN(pid) && pid > 0 && pid !== process.pid) {
+            console.log(`[Server] Releasing port ${PORT} held by stale process PID ${pid}...`);
+            try {
+              execSync(`taskkill /F /PID ${pid}`, { stdio: 'ignore', timeout: 5000 });
+            } catch (_killErr) {}
+          }
+        }
+      } catch (_netErr) {
+        // Port is already free
+      }
     }
 
     app.listen(PORT, '0.0.0.0', () => {

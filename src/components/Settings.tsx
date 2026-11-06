@@ -647,10 +647,20 @@ export const Settings: React.FC<SettingsProps> = ({ settings, devices, onSave, o
   const [isTestingDiscord, setIsTestingDiscord] = useState(false);
   const [isTestingWebhook, setIsTestingWebhook] = useState(false);
   const [unlockedPin, setUnlockedPin] = useState<string>(() => sessionStorage.getItem('netsentinel_admin_pin') || '');
-  const [gitRepoUrl, setGitRepoUrl] = useState<string>('');
+  const [gitRepoUrl, setGitRepoUrl] = useState<string>('https://github.com/suphol4726/eboard-monitor.git');
   const [gitLastCommit, setGitLastCommit] = useState<string>('');
   const [isSelfUpdating, setIsSelfUpdating] = useState<boolean>(false);
+  const [copiedCmd, setCopiedCmd] = useState<boolean>(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const windowsOneLinerCmd = `cd /d C:\\eboard-monitor && (if exist "C:\\Program Files\\Git\\cmd\\git.exe" set "PATH=%PATH%;C:\\Program Files\\Git\\cmd") && (if not exist .backup_data mkdir .backup_data) && (if exist devices.json copy /Y devices.json .backup_data\\devices.json.bak >nul) && (if exist settings.json copy /Y settings.json .backup_data\\settings.json.bak >nul) && (if exist logs.json copy /Y logs.json .backup_data\\logs.json.bak >nul) && call pm2 stop eboard-monitor & (for /f "tokens=5" %a in ('netstat -aon ^| findstr ":3000" ^| findstr "LISTENING"') do taskkill /F /PID %a) & (if not exist .git (git init && git remote add origin https://github.com/suphol4726/eboard-monitor.git) else (git remote set-url origin https://github.com/suphol4726/eboard-monitor.git)) && git fetch --all && git reset --hard origin/main && (if exist .backup_data\\devices.json.bak copy /Y .backup_data\\devices.json.bak devices.json >nul) && (if exist .backup_data\\settings.json.bak copy /Y .backup_data\\settings.json.bak settings.json >nul) && (if exist .backup_data\\logs.json.bak copy /Y .backup_data\\logs.json.bak logs.json >nul) && (if exist dist\\server.cjs del /F /Q dist\\server.cjs) && call npm run build && call pm2 delete eboard-monitor & call pm2 start dist/server.cjs --name eboard-monitor && call pm2 save`;
+
+  const handleCopyUnlockCmd = () => {
+    navigator.clipboard.writeText(windowsOneLinerCmd);
+    setCopiedCmd(true);
+    toast.success('คัดลอกคำสั่งปลดล็อก Port 3000 & อัปเดตแล้ว! นำไปวางในหน้าต่าง CMD แล้วกด Enter ได้เลย');
+    setTimeout(() => setCopiedCmd(false), 3000);
+  };
 
   const fetchUpdateInfo = async () => {
     try {
@@ -682,6 +692,9 @@ export const Settings: React.FC<SettingsProps> = ({ settings, devices, onSave, o
       const data = await res.json();
       if (res.ok) {
         toast.success(data.message || 'อัปเดตโค้ดและรีสตาร์ตระบบสำเร็จ! กรุณารอ 3-5 วินาทีแล้วรีเฟรชหน้าเว็บ', { duration: 7000 });
+      } else if (res.status === 404) {
+        navigator.clipboard.writeText(windowsOneLinerCmd);
+        toast.error('โปรเซส Node.js ตัวเก่ายังค้างยึด Port 3000 อยู่! ระบบได้คัดลอกคำสั่งปลดล็อกให้อัตโนมัติแล้ว กรุณานำไปวางใน CMD แล้วกด Enter 1 ครั้งครับ', { duration: 8000 });
       } else {
         toast.error(data.error || 'การอัปเดตล้มเหลว');
       }
@@ -2060,10 +2073,21 @@ export const Settings: React.FC<SettingsProps> = ({ settings, devices, onSave, o
                     เวอร์ชัน Git ล่าสุดบนเครื่อง: {gitLastCommit}
                   </p>
                 )}
-                <div className="text-xs text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-900/60 p-3 rounded-xl border border-slate-200/70 dark:border-slate-800 space-y-1">
-                  <p className="font-bold text-slate-700 dark:text-slate-300">วิธีใช้งานให้ซิงก์จาก AI Studio ลงเครื่องจริงไวที่สุด:</p>
-                  <p>1. บนหน้าเว็บ AI Studio กดไอคอน <b>GitHub</b> ด้านบนขวาเพื่อซิงก์โค้ดขึ้น GitHub Repository ของคุณ (หรือดาวน์โหลดไฟล์ไปรัน <code className="font-mono">update-windows.bat</code> ที่เครื่องเซิร์ฟเวอร์)</p>
-                  <p>2. นำลิงก์ GitHub Repo มาวางในช่องด้านบน แล้วกดปุ่ม <b>"ดึงอัปเดตล่าสุด & รีสตาร์ตทันที"</b> ระบบจะดึงโค้ดใหม่ สั่ง Build และรีสตาร์ต PM2 เองโดยรักษาไฟล์ <code className="font-mono">devices.json</code>, <code className="font-mono">settings.json</code> และ <code className="font-mono">logs.json</code> เดิมไว้ 100%</p>
+                <div className="text-xs text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-900/60 p-3.5 rounded-xl border border-slate-200/70 dark:border-slate-800 space-y-2">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <p className="font-bold text-slate-700 dark:text-slate-300">วิธีใช้งานให้ซิงก์จาก AI Studio ลงเครื่องจริงไวที่สุด:</p>
+                    <button
+                      type="button"
+                      onClick={handleCopyUnlockCmd}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-700 dark:text-amber-300 rounded-lg font-bold text-xs transition-colors cursor-pointer self-start sm:self-auto"
+                    >
+                      {copiedCmd ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                      <span>{copiedCmd ? 'คัดลอกคำสั่ง CMD แล้ว!' : 'คัดลอกคำสั่งปลดล็อก Port 3000 (สำหรับรันใน CMD ครั้งแรก)'}</span>
+                    </button>
+                  </div>
+                  <p>1. บนหน้าเว็บ AI Studio กดไอคอน <b>GitHub</b> ด้านบนขวาเพื่อซิงก์โค้ดขึ้น <code className="font-mono">suphol4726/eboard-monitor</code></p>
+                  <p>2. กดปุ่ม <b>"ดึงอัปเดตล่าสุด & รีสตาร์ตทันที"</b> ด้านบน ระบบจะดึงโค้ดใหม่ สั่ง Build และรีสตาร์ต PM2 เองโดยรักษาไฟล์ <code className="font-mono">devices.json</code>, <code className="font-mono">settings.json</code> และ <code className="font-mono">logs.json</code> เดิมไว้ 100%</p>
+                  <p className="text-amber-600 dark:text-amber-400">หมายเหตุ: หากกดครั้งแรกแล้วขึ้น <b>API route not found</b> แปลว่าโปรเซส Node ตัวเก่ายังค้างยึด Port 3000 อยู่ ให้กดปุ่มสีเหลืองด้านขวาเพื่อคัดลอกคำสั่งไปวางใน CMD เพียงครั้งเดียว หรือดับเบิลคลิกไฟล์ <code className="font-mono">update-windows.bat</code> ครับ</p>
                 </div>
               </div>
             </SettingsCard>
