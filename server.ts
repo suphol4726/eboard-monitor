@@ -1168,9 +1168,9 @@ app.post('/api/scan-subnet', async (req, res) => {
   };
 
   try {
-    // In 'registered_mac_only' mode, enforce 10.80.80.1 - 10.80.80.254 subnet scan
+    // In 'registered_mac_only' mode, sweep both 10.80.80.1 - 10.80.81.254 (/23 school subnet)
     const effectiveStartIp = mode === 'registered_mac_only' ? '10.80.80.1' : startIp;
-    const effectiveEndIp = mode === 'registered_mac_only' ? '10.80.80.254' : endIp;
+    const effectiveEndIp = mode === 'registered_mac_only' ? '10.80.81.254' : endIp;
 
     const startInt = ipToInt(effectiveStartIp);
     const endInt = ipToInt(effectiveEndIp);
@@ -1180,21 +1180,24 @@ app.post('/api/scan-subnet', async (req, res) => {
     }
 
     const rangeSize = endInt - startInt + 1;
-    if (rangeSize > 256) {
-      return res.status(400).json({ error: 'อนุญาตให้สแกนได้สูงสุด 256 IP ต่อครั้ง เพื่อความรวดเร็วและป้องกันระบบโหลดหนัก' });
+    if (rangeSize > 512) {
+      return res.status(400).json({ error: 'อนุญาตให้สแกนได้สูงสุด 512 IP ต่อครั้ง เพื่อความรวดเร็วและป้องกันระบบโหลดหนัก' });
     }
 
     const ipList: string[] = [];
     for (let i = startInt; i <= endInt; i++) {
-      ipList.push(intToIp(i));
+      const candidateIp = intToIp(i);
+      if (!candidateIp.endsWith('.0') && !candidateIp.endsWith('.255')) {
+        ipList.push(candidateIp);
+      }
     }
 
     const timeoutSec = Math.max(0.3, timeoutMs / 1000);
     const isWindows = process.platform === 'win32';
     const alivePingMap = new Map<string, number>();
 
-    // 1. Sweep ping across the IP range (max 36 concurrent) to wake up ARP cache and measure latency
-    await runWithConcurrency(ipList, 36, async (ip) => {
+    // 1. Sweep ping across the IP range (max 48 concurrent) to wake up ARP cache and measure latency
+    await runWithConcurrency(ipList, 48, async (ip) => {
       try {
         const pingOptions: any = {
           timeout: timeoutSec,
@@ -1211,9 +1214,9 @@ app.post('/api/scan-subnet', async (req, res) => {
     // 2. Read fresh system ARP table after the ping sweep
     const { macToIp, ipToMac } = getArpTableDetails();
 
-    // Also include any IPs in 10.80.80.* that appeared in the ARP table even if they blocked ICMP ping
+    // Also include any IPs in 10.80.*.* that appeared in the ARP table even if they blocked ICMP ping
     for (const [arpIp] of ipToMac.entries()) {
-      if (arpIp.startsWith('10.80.80.') && !alivePingMap.has(arpIp)) {
+      if (arpIp.startsWith('10.80.') && !alivePingMap.has(arpIp)) {
         const arpInt = ipToInt(arpIp);
         if (arpInt >= startInt && arpInt <= endInt) {
           alivePingMap.set(arpIp, 1);
@@ -1240,10 +1243,10 @@ app.post('/api/scan-subnet', async (req, res) => {
     const discoveredResults: any[] = [];
     const matchedDeviceIds = new Set<string>();
 
-    // 3. First pass: Match strictly by MAC address from ARP table in 10.80.80.*
+    // 3. First pass: Match strictly by MAC address from ARP table in 10.80.*.*
     for (const [normMac, dev] of systemDeviceByMac.entries()) {
       const arpIp = macToIp.get(normMac);
-      if (arpIp && arpIp.startsWith('10.80.80.')) {
+      if (arpIp && arpIp.startsWith('10.80.')) {
         const latency = alivePingMap.get(arpIp) ?? 1;
         const previousIp = dev.ip;
         const ipChanged = Boolean(previousIp !== arpIp);
@@ -1290,10 +1293,10 @@ app.post('/api/scan-subnet', async (req, res) => {
       }
     }
 
-    // 4. Second pass: Check alive IPs in 10.80.80.* for system devices matched by IP (or unregistered devices if mode === 'all_subnet')
+    // 4. Second pass: Check alive IPs in 10.80.*.* for system devices matched by IP (or unregistered devices if mode === 'all_subnet')
     const sortedAliveIps = Array.from(alivePingMap.keys()).sort((a, b) => ipToInt(a) - ipToInt(b));
     for (const ip of sortedAliveIps) {
-      if (!ip.startsWith('10.80.80.') && mode === 'registered_mac_only') continue;
+      if (!ip.startsWith('10.80.') && mode === 'registered_mac_only') continue;
 
       const latency = alivePingMap.get(ip) || 1;
       const arpNormMac = ipToMac.get(ip);
@@ -1636,10 +1639,10 @@ app.get('/api/devices', (_req, res) => {
 });
 
 app.post('/api/devices', (req, res) => {
-  const { pin, device: newDevice } = req.body;
+  const { device: newDevice } = req.body;
   
   // Verify PIN
-  if (settings.adminPin && settings.adminPin !== '' && pin !== settings.adminPin) {
+  if (!verifyAdminPinRequest(req)) {
     return res.status(401).json({ error: 'Unauthorized: Invalid PIN' });
   }
 
@@ -1650,8 +1653,31 @@ app.post('/api/devices', (req, res) => {
   if (!newDevice.ip && !newDevice.macAddress) {
     return res.status(400).json({ error: 'Missing both IP and MAC address' });
   }
+
+  // Immediately resolve IP from ARP table if MAC address is provided
+  if (newDevice.macAddress) {
+    const cleanMac = normalizeMac(newDevice.macAddress);
+    newDevice.macAddress = formatMacColon(cleanMac);
+    const { macToIp } = getArpTableDetails();
+    const arpIp = macToIp.get(cleanMac);
+    if (arpIp && arpIp.startsWith('10.80.')) {
+      newDevice.ip = arpIp;
+      newDevice.status = DeviceStatus.ONLINE;
+      newDevice.lastSeen = new Date().toISOString();
+    }
+  }
+
   devices.push(newDevice);
   saveDevices();
+
+  // Trigger an immediate monitoring & ARP check in background
+  setTimeout(() => {
+    runMonitoring().catch(() => {});
+    if (!newDevice.ip) {
+      runBackgroundSchoolArpSweep().catch(() => {});
+    }
+  }, 150);
+
   res.json(newDevice);
 });
 
@@ -1793,10 +1819,10 @@ app.put('/api/devices/bulk-update', (req, res) => {
 
 app.put('/api/devices/:id', (req, res) => {
   const { id } = req.params;
-  const { pin, device: updatedDevice } = req.body;
+  const { device: updatedDevice } = req.body;
   
   // Verify PIN if adminPin is configured in settings
-  if (settings.adminPin && settings.adminPin !== '' && pin !== settings.adminPin) {
+  if (!verifyAdminPinRequest(req)) {
     return res.status(401).json({ error: 'Unauthorized: Invalid PIN' });
   }
 
@@ -1805,8 +1831,23 @@ app.put('/api/devices/:id', (req, res) => {
     return res.status(404).json({ error: 'Device not found' });
   }
 
+  if (updatedDevice && updatedDevice.macAddress) {
+    const cleanMac = normalizeMac(updatedDevice.macAddress);
+    updatedDevice.macAddress = formatMacColon(cleanMac);
+    const { macToIp } = getArpTableDetails();
+    const arpIp = macToIp.get(cleanMac);
+    if (arpIp && arpIp.startsWith('10.80.')) {
+      updatedDevice.ip = arpIp;
+      updatedDevice.status = DeviceStatus.ONLINE;
+      updatedDevice.statusReason = undefined;
+    }
+  }
+
   devices[index] = { ...devices[index], ...updatedDevice };
   saveDevices();
+  setTimeout(() => {
+    runMonitoring().catch(() => {});
+  }, 150);
   res.json(devices[index]);
 });
 
@@ -4008,9 +4049,9 @@ function getArpTableDetails(): { macToIp: Map<string, string>; ipToMac: Map<stri
 
           ipToMac.set(ip, normMac);
 
-          // Always prioritize 10.80.80.* IPs for MAC-to-IP resolution
+          // Always prioritize 10.80.*.* school IPs for MAC-to-IP resolution
           const existingIp = macToIp.get(normMac);
-          if (!existingIp || ip.startsWith('10.80.80.')) {
+          if (!existingIp || ip.startsWith('10.80.')) {
             macToIp.set(normMac, ip);
           }
         }
@@ -4022,11 +4063,16 @@ function getArpTableDetails(): { macToIp: Map<string, string>; ipToMac: Map<stri
   return { macToIp, ipToMac };
 }
 
-// Fast background ARP warm-up sweep for 10.80.80.1 - 10.80.80.254
-// Ensures newly powered-on E-Boards in 10.80.80.* populate the OS ARP table automatically
+// Fast background ARP warm-up sweep for 10.80.80.1 - 10.80.81.254 (both .80.* and .81.* school subnets)
+// Ensures newly powered-on E-Boards/PCs in 10.80.*.* populate the OS ARP table automatically
 // without requiring the user to manually click "Scan Network"
+let arpSweepSubnetToggle = 0;
 async function runBackgroundSchoolArpSweep() {
   if (isArpSweeping || settings.simulateNetwork) return;
+  const localIp = getLocalIpAddress();
+  const isOnSchoolNetwork = process.platform === 'win32' || localIp.startsWith('10.80.');
+  if (!isOnSchoolNetwork) return; // Skip raw LAN ARP sweep inside cloud preview container
+
   const offlineOrMacDevices = devices.filter(
     d => d.isMonitored && !d.isMaintenance && (d.status === DeviceStatus.OFFLINE || Boolean(d.macAddress))
   );
@@ -4035,13 +4081,16 @@ async function runBackgroundSchoolArpSweep() {
   isArpSweeping = true;
   try {
     const isWindows = process.platform === 'win32';
+    const subnetPrefix = arpSweepSubnetToggle % 2 === 0 ? '10.80.80' : '10.80.81';
+    arpSweepSubnetToggle++;
+
     const ipList: string[] = [];
     for (let i = 1; i <= 254; i++) {
-      ipList.push(`10.80.80.${i}`);
+      ipList.push(`${subnetPrefix}.${i}`);
     }
 
-    // Fast lightweight probe (350ms timeout, 32 concurrency) to populate OS ARP table for 10.80.80.*
-    await runWithConcurrency(ipList, 32, async (ip) => {
+    // Fast lightweight probe (350ms timeout, 24 concurrency) to populate OS ARP table
+    await runWithConcurrency(ipList, 24, async (ip) => {
       try {
         await ping.promise.probe(ip, {
           timeout: 0.4,
@@ -4050,12 +4099,12 @@ async function runBackgroundSchoolArpSweep() {
       } catch (_e) {}
     });
 
-    // Immediately trigger monitoring pass so any newly discovered MAC in 10.80.80.* turns ONLINE right away
+    // Immediately trigger monitoring pass so any newly discovered MAC in 10.80.*.* turns ONLINE right away
     if (!isMonitoring) {
       await runMonitoring();
     }
   } catch (e) {
-    console.error('[Auto ARP Sweep] Error sweeping 10.80.80.*:', e);
+    console.error('[Auto ARP Sweep] Error sweeping 10.80.*.*:', e);
   } finally {
     isArpSweeping = false;
   }
@@ -4096,10 +4145,12 @@ async function runMonitoring() {
   const now = new Date().toISOString();
   let devicesChanged = false;
   let criticalStateChanged = false;
+  const localHostIp = getLocalIpAddress();
+  const isLocalSchoolServer = process.platform === 'win32' || localHostIp.startsWith('10.80.');
 
   try {
-    // Retrieve current ARP mappings (MAC <-> IP) to resolve dynamic IPs for MAC-configured devices in 10.80.80.*
-    const { macToIp: arpMap, ipToMac } = settings.simulateNetwork
+    // Retrieve current ARP mappings (MAC <-> IP) to resolve dynamic IPs for MAC-configured devices in 10.80.*.*
+    const { macToIp: arpMap, ipToMac } = (settings.simulateNetwork || !isLocalSchoolServer)
       ? { macToIp: new Map<string, string>(), ipToMac: new Map<string, string>() }
       : getArpTableDetails();
 
@@ -4119,8 +4170,9 @@ async function runMonitoring() {
       return 0;
     });
 
-    // Run pings with controlled concurrency (max 24 at a time)
-    await runWithConcurrency(sortedDevices, 24, async (device) => {
+    // Run pings with controlled concurrency (24 on local Windows server, 6 in cloud preview container)
+    const monitorConcurrency = isLocalSchoolServer ? 24 : 6;
+    await runWithConcurrency(sortedDevices, monitorConcurrency, async (device) => {
       // Resolve Dynamic IP via MAC Address if configured (strictly within 10.80.80.*)
       let hasMacAndConflict = false;
       let conflictDetails = '';
@@ -4130,8 +4182,8 @@ async function runMonitoring() {
         if (cleanDeviceMac) {
           if (arpMap.has(cleanDeviceMac)) {
             const resolvedIp = arpMap.get(cleanDeviceMac)!;
-            // Only auto-update IP if it's in the 10.80.80.* school subnet
-            if (resolvedIp && resolvedIp.startsWith('10.80.80.') && resolvedIp !== device.ip) {
+            // Auto-update IP if it's in the 10.80.*.* school subnet (10.80.80.* or 10.80.81.*)
+            if (resolvedIp && resolvedIp.startsWith('10.80.') && resolvedIp !== device.ip) {
               console.log(`[ARP Dynamic DNS] Device "${device.name}" with MAC "${device.macAddress}" resolved dynamically from "${device.ip || 'none'}" to "${resolvedIp}"`);
               device.ip = resolvedIp;
               devicesChanged = true;
@@ -4147,7 +4199,7 @@ async function runMonitoring() {
               if (ip === device.ip && mac !== cleanDeviceMac) {
                 const formattedMac = mac.match(/.{1,2}/g)?.join(':') || mac;
                 const actualOwner = registeredMacToDevice.get(mac);
-                if (actualOwner && actualOwner.id !== device.id && device.ip.startsWith('10.80.80.')) {
+                if (actualOwner && actualOwner.id !== device.id && device.ip.startsWith('10.80.')) {
                   if (actualOwner.ip !== device.ip) {
                     console.log(`[Cross-Room MAC Handover] Transferring IP ${device.ip} from "${device.name}" to "${actualOwner.name}" (MAC ${formattedMac})`);
                     actualOwner.ip = device.ip;
@@ -4264,7 +4316,7 @@ async function runMonitoring() {
                 const postPingArp = getArpTableDetails();
                 if (postPingArp.macToIp.has(cleanDeviceMac)) {
                   const newIp = postPingArp.macToIp.get(cleanDeviceMac)!;
-                  if (newIp.startsWith('10.80.80.') && newIp !== device.ip) {
+                  if (newIp.startsWith('10.80.') && newIp !== device.ip) {
                     device.ip = newIp;
                     devicesChanged = true;
                     criticalStateChanged = true;
@@ -4274,7 +4326,7 @@ async function runMonitoring() {
                   if (actualMac !== cleanDeviceMac) {
                     const formattedMac = actualMac.match(/.{1,2}/g)?.join(':') || actualMac;
                     const actualOwner = registeredMacToDevice.get(actualMac);
-                    if (actualOwner && actualOwner.id !== device.id && device.ip.startsWith('10.80.80.')) {
+                    if (actualOwner && actualOwner.id !== device.id && device.ip.startsWith('10.80.')) {
                       if (actualOwner.ip !== device.ip) {
                         actualOwner.ip = device.ip;
                         actualOwner.statusReason = undefined;
@@ -4298,8 +4350,8 @@ async function runMonitoring() {
                 const parsedTime = parseFloat(String(result.time));
                 latency = !isNaN(parsedTime) ? Math.max(1, Math.round(parsedTime)) : 1;
                 status = latency > settings.warningThreshold ? DeviceStatus.WARNING : DeviceStatus.ONLINE;
-                // Auto-learn MAC address if device is in 10.80.80.* and doesn't have one saved yet
-                if (!device.macAddress && device.ip.startsWith('10.80.80.') && ipToMac.has(device.ip)) {
+                // Auto-learn MAC address if device is in 10.80.*.* and doesn't have one saved yet
+                if (!device.macAddress && device.ip.startsWith('10.80.') && ipToMac.has(device.ip)) {
                   device.macAddress = formatMacColon(ipToMac.get(device.ip)!);
                   devicesChanged = true;
                 }

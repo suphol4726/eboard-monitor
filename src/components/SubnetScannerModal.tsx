@@ -69,7 +69,7 @@ export const SubnetScannerModal: React.FC<SubnetScannerModalProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           startIp: scanMode === 'registered_mac_only' ? '10.80.80.1' : startIp,
-          endIp: scanMode === 'registered_mac_only' ? '10.80.80.254' : endIp,
+          endIp: scanMode === 'registered_mac_only' ? '10.80.81.254' : endIp,
           timeoutMs: 550,
           mode: scanMode,
           autoSyncMatched: true
@@ -92,7 +92,7 @@ export const SubnetScannerModal: React.FC<SubnetScannerModalProps> = ({
 
       setScannedHosts(activeList);
       setScanSummary({
-        scanned: data.scannedCount || 254,
+        scanned: data.scannedCount || 508,
         found: data.foundCount || 0,
         matchedSystemCount: data.matchedSystemCount || 0,
         ipUpdatedCount: data.ipUpdatedCount || 0,
@@ -101,14 +101,14 @@ export const SubnetScannerModal: React.FC<SubnetScannerModalProps> = ({
 
       if (scanMode === 'registered_mac_only') {
         toast.success(
-          `สแกนจับคู่ MAC (10.80.80.*) สำเร็จ! พบออนไลน์ ${data.matchedSystemCount || 0} เครื่อง` +
+          `สแกนจับคู่ MAC (10.80.80.* - 10.80.81.*) สำเร็จ! พบออนไลน์ ${data.matchedSystemCount || 0} เครื่อง` +
           (data.ipUpdatedCount > 0 ? ` (อัปเดต IP ใหม่ ${data.ipUpdatedCount} เครื่อง)` : '')
         );
       } else {
         toast.success(`สแกนเสร็จสิ้น! พบอุปกรณ์ทำงานอยู่ ${data.foundCount} เครื่อง`);
       }
     } catch (e: any) {
-      toast.error(e.message || 'เกิดข้อผิดพลาดขณะสแกนวง 10.80.80.*');
+      toast.error(e.message || 'เกิดข้อผิดพลาดขณะสแกนวง 10.80.*.*');
     } finally {
       setIsScanning(false);
     }
