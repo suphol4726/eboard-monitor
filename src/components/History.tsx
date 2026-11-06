@@ -1,7 +1,7 @@
 
 import React, { useState } from 'react';
 import { DowntimeLog, Device, AppSettings } from '../types';
-import { Bot, AlertOctagon, CheckCircle2, Clock, Loader2, Search, Download, Printer, FileText } from 'lucide-react';
+import { Bot, AlertOctagon, CheckCircle2, Clock, Loader2, Search, Download, Printer, FileText, Sparkles } from 'lucide-react';
 import { generateLocalIncidentReport } from '../services/analysisService';
 import { generateAISummary } from '../services/geminiService';
 import { exportToExcel } from '../utils/reportExporter';
@@ -12,16 +12,45 @@ interface HistoryProps {
   logs: DowntimeLog[];
   devices: Device[];
   settings: AppSettings;
+  onSyncLogs?: (newLogs: DowntimeLog[]) => void;
 }
 
-export const History: React.FC<HistoryProps> = ({ logs, devices, settings }) => {
+export const History: React.FC<HistoryProps> = ({ logs, devices, settings, onSyncLogs }) => {
   const [isGenerating, setIsGenerating] = useState(false);
+  const [isCleaningLogs, setIsCleaningLogs] = useState(false);
   const [report, setReport] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [filterType, setFilterType] = useState<string>('ALL');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
   const [isExecutiveReportOpen, setIsExecutiveReportOpen] = useState(false);
+
+  const conflictLogsCount = logs.filter(l => l.message && (l.message.includes('IP Conflict') || l.message.includes('[SIM]'))).length;
+
+  const handleCleanupNoisyLogs = async () => {
+    setIsCleaningLogs(true);
+    try {
+      const pin = sessionStorage.getItem('netsentinel_admin_pin') || '';
+      const res = await fetch('/api/logs/cleanup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pin })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(data.error || 'กรุณาปลดล็อกโหมดผู้ดูแลระบบ (Admin PIN) มุมขวาบนก่อนล้าง Log ขยะ');
+        return;
+      }
+      if (data.logs && Array.isArray(data.logs) && onSyncLogs) {
+        onSyncLogs(data.logs);
+      }
+      toast.success(`ล้าง Log ขยะ / IP Conflict ออก ${data.removedCount || 0} รายการเรียบร้อยแล้ว (เหลือประวัติจริง ${data.remainingCount || 0} รายการ)`);
+    } catch (_e) {
+      toast.error('ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์เพื่อล้าง Log ขยะได้');
+    } finally {
+      setIsCleaningLogs(false);
+    }
+  };
 
   // Calculate log stats
   const totalLogs = logs.length;
@@ -183,6 +212,15 @@ export const History: React.FC<HistoryProps> = ({ logs, devices, settings }) => 
         </div>
         <div className="flex flex-wrap items-center gap-2 sm:gap-3 w-full md:w-auto">
           <button
+            onClick={handleCleanupNoisyLogs}
+            disabled={isCleaningLogs || logs.length === 0}
+            className="flex items-center gap-1.5 bg-amber-500 hover:bg-amber-600 text-white px-3 sm:px-3.5 py-1.5 sm:py-2 rounded-xl font-bold transition-all shadow-md shadow-amber-500/20 text-xs disabled:opacity-50 cursor-pointer"
+            title="ลบเฉพาะ Log ที่เกิดจาก IP Conflict หรือข้อมูลซ้ำซ้อน โดยเก็บประวัติจริงไว้ครบ"
+          >
+            {isCleaningLogs ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+            <span>ล้าง Log ขยะ / IP ชนกัน{conflictLogsCount > 0 ? ` (${conflictLogsCount})` : ''}</span>
+          </button>
+          <button
             onClick={handleExportLogs}
             disabled={logs.length === 0}
             className="flex items-center gap-1.5 bg-slate-700 hover:bg-slate-800 text-white px-2.5 sm:px-3.5 py-1.5 sm:py-2 rounded-xl font-bold transition-all text-xs disabled:opacity-50"
@@ -244,15 +282,35 @@ export const History: React.FC<HistoryProps> = ({ logs, devices, settings }) => 
          <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl sm:rounded-2xl p-3 sm:p-4 shadow-xs col-span-1 sm:col-span-2 md:col-span-1">
             <div className="flex justify-between items-center mb-1.5 sm:mb-2">
                <p className="text-[10px] sm:text-xs font-bold text-slate-400 uppercase tracking-wider">ความจุของ Log ({totalLogs}/{settings.maxLogEntries})</p>
-               <span className={`text-[10px] sm:text-xs font-bold ${logCapacityPercent > 90 ? 'text-red-500' : 'text-slate-500'}`}>{logCapacityPercent}%</span>
+               <span className={`text-[10px] sm:text-xs font-bold ${
+                 !settings.enableAutoDelete && logCapacityPercent > 90
+                   ? 'text-red-500'
+                   : logCapacityPercent >= 100
+                     ? 'text-emerald-600 dark:text-emerald-400'
+                     : 'text-slate-500'
+               }`}>
+                 {settings.enableAutoDelete && logCapacityPercent >= 100 ? 'วนทับอัตโนมัติ (FIFO)' : `${logCapacityPercent}%`}
+               </span>
             </div>
             <div className="h-2 w-full bg-slate-100 dark:bg-slate-700 rounded-full overflow-hidden">
                <div 
-                  className={`h-full transition-all duration-500 ${logCapacityPercent > 90 ? 'bg-red-500' : logCapacityPercent > 70 ? 'bg-amber-500' : 'bg-blue-500'}`}
+                  className={`h-full transition-all duration-500 ${
+                    !settings.enableAutoDelete && logCapacityPercent > 90
+                      ? 'bg-red-500'
+                      : logCapacityPercent >= 100
+                        ? 'bg-emerald-500'
+                        : logCapacityPercent > 70
+                          ? 'bg-amber-500'
+                          : 'bg-blue-500'
+                  }`}
                   style={{ width: `${logCapacityPercent}%` }}
                ></div>
             </div>
-            <p className="text-[10px] text-slate-400 mt-1.5 text-right">ข้อมูลจะถูกลบอัตโนมัติเมื่อถึงขีดจำกัด</p>
+            <p className="text-[10px] text-slate-400 mt-1.5 text-right">
+              {settings.enableAutoDelete
+                ? 'เมื่อครบ 500 รายการ ระบบจะดันรายการเก่าสุดออกทีละรายการอัตโนมัติ'
+                : 'ปิดการลบอัตโนมัติอยู่ (สามารถเปิดได้ที่เมนูตั้งค่า)'}
+            </p>
          </div>
       </div>
 

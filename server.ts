@@ -356,12 +356,58 @@ function getClientIp(req: express.Request): string {
   return req.ip || req.socket?.remoteAddress || 'unknown';
 }
 
+function verifyAdminPinRequest(req: express.Request): boolean {
+  if (!settings.adminPin || settings.adminPin === '') return true;
+  const headerPin = req.headers['x-admin-pin'];
+  const providedPin =
+    (typeof headerPin === 'string' && headerPin) ||
+    (req.body && typeof req.body.pin === 'string' ? req.body.pin : '') ||
+    (req.query && typeof req.query.pin === 'string' ? req.query.pin : '');
+  return providedPin === settings.adminPin;
+}
+
 // --- LOGS MANAGEMENT ---
 let logs: DowntimeLog[] = [];
 
 const saveLogs = () => {
+  pruneLogs(false);
   writeJsonAtomicSync(LOGS_FILE, logs);
 };
+
+// Smart log insertion with anti-spam deduplication & cooldown
+function insertLogSmart(newLog: DowntimeLog): boolean {
+  const nowMs = new Date(newLog.timestamp).getTime() || Date.now();
+  const isConflictLog = Boolean(newLog.message && newLog.message.includes('IP Conflict'));
+  const cooldownMs = isConflictLog ? 15 * 60 * 1000 : 120 * 1000; // 15 min for IP conflict, 2 min for rapid flap
+
+  const existingIdx = logs.findIndex((l) => {
+    if (l.deviceId !== newLog.deviceId || l.type !== newLog.type) return false;
+    const prevMs = new Date(l.timestamp).getTime() || 0;
+    return Math.abs(nowMs - prevMs) <= cooldownMs;
+  });
+
+  if (existingIdx !== -1) {
+    const existing = logs[existingIdx];
+    const matchRepeat = existing.message.match(/\(ซ้ำ x(\d+)\)$/);
+    const nextCount = matchRepeat ? parseInt(matchRepeat[1], 10) + 1 : 2;
+    const baseMsg = newLog.message.replace(/\s*\(ซ้ำ x\d+\)$/, '');
+    const updated: DowntimeLog = {
+      ...existing,
+      ip: newLog.ip || existing.ip,
+      timestamp: newLog.timestamp,
+      message: `${baseMsg} (ซ้ำ x${nextCount})`,
+      remarks: newLog.remarks ?? existing.remarks
+    };
+    logs.splice(existingIdx, 1);
+    logs.unshift(updated);
+    saveLogs();
+    return false; // Coalesced into existing recent log; skip duplicate push notification
+  }
+
+  logs.unshift(newLog);
+  saveLogs();
+  return true;
+}
 
 const pruneReports = () => {
   try {
@@ -505,20 +551,48 @@ app.get('/api/logs', (_req, res) => {
 
 app.post('/api/logs', (req, res) => {
   const newLog: DowntimeLog = req.body;
-  logs.unshift(newLog); // Add to beginning
-
-  // Auto-delete logic & atomic disk save
-  pruneLogs(false);
-  saveLogs();
-
+  insertLogSmart(newLog);
   res.json(newLog);
 });
 
+app.post('/api/logs/cleanup', (req, res) => {
+  if (!verifyAdminPinRequest(req)) {
+    return res.status(401).json({ error: 'Unauthorized: กรุณายืนยันรหัส PIN ผู้ดูแลระบบก่อนล้าง Log ขยะ' });
+  }
+
+  const originalCount = logs.length;
+  const cleaned: DowntimeLog[] = [];
+  const lastTypeByDevice = new Map<string, string>();
+
+  // Traverse from oldest to newest so we keep genuine state transitions and drop IP Conflict / SIM / duplicate spam
+  for (let i = logs.length - 1; i >= 0; i--) {
+    const entry = logs[i];
+    const msg = String(entry.message || '');
+    if (msg.includes('IP Conflict') || msg.includes('[SIM]')) {
+      continue;
+    }
+    const prevType = lastTypeByDevice.get(entry.deviceId);
+    if (entry.deviceId !== 'system' && prevType === entry.type) {
+      continue;
+    }
+    lastTypeByDevice.set(entry.deviceId, entry.type);
+    cleaned.unshift(entry);
+  }
+
+  logs = cleaned;
+  saveLogs();
+  const removedCount = Math.max(0, originalCount - logs.length);
+  console.log(`[Log Cleanup] Removed ${removedCount} noisy/conflict log entries. Remaining: ${logs.length}`);
+  res.json({
+    success: true,
+    removedCount,
+    remainingCount: logs.length,
+    logs
+  });
+});
+
 app.delete('/api/logs', (req, res) => {
-  const { pin } = req.body;
-  
-  // Verify PIN
-  if (settings.adminPin && settings.adminPin !== '' && pin !== settings.adminPin) {
+  if (!verifyAdminPinRequest(req)) {
     return res.status(401).json({ error: 'Unauthorized: Invalid PIN' });
   }
 
@@ -1360,12 +1434,28 @@ app.get('/api/system/update-info', (_req, res) => {
       } catch (_e) {}
     }
 
+    // Check 7-day rolling daily backups in .backup_data
+    const backupDir = path.join(process.cwd(), '.backup_data');
+    let dailyBackupsCount = 0;
+    let latestDailyBackup = '';
+    try {
+      if (fs.existsSync(backupDir)) {
+        const files = fs.readdirSync(backupDir).filter(f => f.startsWith('devices-') && f.endsWith('.json')).sort().reverse();
+        dailyBackupsCount = files.length;
+        if (files.length > 0) {
+          latestDailyBackup = files[0].replace('devices-', '').replace('.json', '');
+        }
+      }
+    } catch (_e) {}
+
     res.json({
       gitConfigured: Boolean(gitDirExists && remoteUrl),
       gitDirExists,
       remoteUrl,
       currentBranch,
       lastCommit,
+      dailyBackupsCount,
+      latestDailyBackup,
       platform: process.platform,
       cwd: process.cwd()
     });
@@ -1375,9 +1465,9 @@ app.get('/api/system/update-info', (_req, res) => {
 });
 
 app.post('/api/system/self-update', async (req, res) => {
-  const { pin, repoUrl } = req.body || {};
+  const { repoUrl } = req.body || {};
 
-  if (settings.adminPin && settings.adminPin !== '' && pin !== settings.adminPin) {
+  if (!verifyAdminPinRequest(req)) {
     return res.status(401).json({ error: 'Unauthorized: รหัส PIN ไม่ถูกต้อง' });
   }
 
@@ -4013,6 +4103,15 @@ async function runMonitoring() {
       ? { macToIp: new Map<string, string>(), ipToMac: new Map<string, string>() }
       : getArpTableDetails();
 
+    // Build fast lookup map of all registered MAC addresses -> Device for Instant Cross-Room MAC Handover
+    const registeredMacToDevice = new Map<string, Device>();
+    for (const d of devices) {
+      if (d.macAddress) {
+        const norm = normalizeMac(d.macAddress);
+        if (norm) registeredMacToDevice.set(norm, d);
+      }
+    }
+
     // Prioritize checking OFFLINE devices first so newly powered-on E-Boards turn ONLINE as fast as possible
     const sortedDevices = [...devices].sort((a, b) => {
       if (a.status === DeviceStatus.OFFLINE && b.status !== DeviceStatus.OFFLINE) return -1;
@@ -4047,9 +4146,21 @@ async function runMonitoring() {
             for (const [mac, ip] of arpMap.entries()) {
               if (ip === device.ip && mac !== cleanDeviceMac) {
                 const formattedMac = mac.match(/.{1,2}/g)?.join(':') || mac;
+                const actualOwner = registeredMacToDevice.get(mac);
+                if (actualOwner && actualOwner.id !== device.id && device.ip.startsWith('10.80.80.')) {
+                  if (actualOwner.ip !== device.ip) {
+                    console.log(`[Cross-Room MAC Handover] Transferring IP ${device.ip} from "${device.name}" to "${actualOwner.name}" (MAC ${formattedMac})`);
+                    actualOwner.ip = device.ip;
+                    actualOwner.statusReason = undefined;
+                    devicesChanged = true;
+                    criticalStateChanged = true;
+                  }
+                  conflictDetails = `IP Conflict (IP ${device.ip} ถูกใช้งานโดย ${actualOwner.name} [${formattedMac}] ขณะเครื่องนี้ปิดอยู่)`;
+                } else {
+                  conflictDetails = `IP Conflict (Another device with MAC ${formattedMac} is using IP ${device.ip})`;
+                }
                 console.log(`[ARP Conflict] IP "${device.ip}" is currently used by MAC "${mac}", but device "${device.name}" expects MAC "${cleanDeviceMac}". Marking as OFFLINE.`);
                 hasMacAndConflict = true;
-                conflictDetails = `IP Conflict (Another device with MAC ${formattedMac} is using IP ${device.ip})`;
                 break;
               }
             }
@@ -4113,6 +4224,10 @@ async function runMonitoring() {
             if (!result.alive && device.status !== DeviceStatus.OFFLINE) {
               await new Promise(r => setTimeout(r, 250));
               result = await checkTcpPort(device.ip, device.monitorPort, timeoutThreshold);
+              if (!result.alive) {
+                await new Promise(r => setTimeout(r, 250));
+                result = await checkTcpPort(device.ip, device.monitorPort, timeoutThreshold);
+              }
             }
             if (result.alive) {
               latency = result.time;
@@ -4131,20 +4246,63 @@ async function runMonitoring() {
             };
             
             let result = await ping.promise.probe(device.ip, pingOptions);
-            // Double-check confirmation retry if device was previously ONLINE/WARNING to prevent false-positive flaps
+            // 2-Step Anti-Flap confirmation retries when transitioning downward (ONLINE/WARNING -> OFFLINE)
             if (!result.alive && device.status !== DeviceStatus.OFFLINE) {
               await new Promise(r => setTimeout(r, 250));
               result = await ping.promise.probe(device.ip, pingOptions);
+              if (!result.alive) {
+                await new Promise(r => setTimeout(r, 250));
+                result = await ping.promise.probe(device.ip, pingOptions);
+              }
             }
             
             if (result.alive) {
-              const parsedTime = parseFloat(String(result.time));
-              latency = !isNaN(parsedTime) ? Math.max(1, Math.round(parsedTime)) : 1;
-              status = latency > settings.warningThreshold ? DeviceStatus.WARNING : DeviceStatus.ONLINE;
-              // Auto-learn MAC address if device is in 10.80.80.* and doesn't have one saved yet
-              if (!device.macAddress && device.ip.startsWith('10.80.80.') && ipToMac.has(device.ip)) {
-                device.macAddress = formatMacColon(ipToMac.get(device.ip)!);
-                devicesChanged = true;
+              const cleanDeviceMac = device.macAddress ? normalizeMac(device.macAddress) : '';
+              let postPingConflict = false;
+
+              if (cleanDeviceMac && !arpMap.has(cleanDeviceMac)) {
+                const postPingArp = getArpTableDetails();
+                if (postPingArp.macToIp.has(cleanDeviceMac)) {
+                  const newIp = postPingArp.macToIp.get(cleanDeviceMac)!;
+                  if (newIp.startsWith('10.80.80.') && newIp !== device.ip) {
+                    device.ip = newIp;
+                    devicesChanged = true;
+                    criticalStateChanged = true;
+                  }
+                } else if (postPingArp.ipToMac.has(device.ip)) {
+                  const actualMac = postPingArp.ipToMac.get(device.ip)!;
+                  if (actualMac !== cleanDeviceMac) {
+                    const formattedMac = actualMac.match(/.{1,2}/g)?.join(':') || actualMac;
+                    const actualOwner = registeredMacToDevice.get(actualMac);
+                    if (actualOwner && actualOwner.id !== device.id && device.ip.startsWith('10.80.80.')) {
+                      if (actualOwner.ip !== device.ip) {
+                        actualOwner.ip = device.ip;
+                        actualOwner.statusReason = undefined;
+                      }
+                      conflictDetails = `IP Conflict (IP ${device.ip} ถูกใช้งานโดย ${actualOwner.name} [${formattedMac}] ขณะเครื่องนี้ปิดอยู่)`;
+                    } else {
+                      conflictDetails = `IP Conflict (Another device with MAC ${formattedMac} is using IP ${device.ip})`;
+                    }
+                    device.statusReason = conflictDetails;
+                    postPingConflict = true;
+                    devicesChanged = true;
+                    criticalStateChanged = true;
+                  }
+                }
+              }
+
+              if (postPingConflict) {
+                status = DeviceStatus.OFFLINE;
+                latency = 0;
+              } else {
+                const parsedTime = parseFloat(String(result.time));
+                latency = !isNaN(parsedTime) ? Math.max(1, Math.round(parsedTime)) : 1;
+                status = latency > settings.warningThreshold ? DeviceStatus.WARNING : DeviceStatus.ONLINE;
+                // Auto-learn MAC address if device is in 10.80.80.* and doesn't have one saved yet
+                if (!device.macAddress && device.ip.startsWith('10.80.80.') && ipToMac.has(device.ip)) {
+                  device.macAddress = formatMacColon(ipToMac.get(device.ip)!);
+                  devicesChanged = true;
+                }
               }
             } else {
               status = DeviceStatus.OFFLINE;
@@ -4204,22 +4362,19 @@ async function runMonitoring() {
             log.message = status === DeviceStatus.OFFLINE ? '[SIM] Connection timed out.' : '[SIM] Connection restored.';
           }
 
-          logs.unshift(log);
+          const isFreshLog = insertLogSmart(log);
           
           const isOutageAllowed = log.type === 'OUTAGE' && (settings.notifyOutage === true);
           const isRecoveryAllowed = log.type === 'RECOVERY' && (settings.notifyRecovery === true);
           const isWarningAllowed = log.type === 'HIGH_LATENCY' && (settings.notifyWarning === true);
 
-          if (isOutageAllowed || isRecoveryAllowed || isWarningAllowed) {
+          if (isFreshLog && (isOutageAllowed || isRecoveryAllowed || isWarningAllowed)) {
             sendWebhook(log);
             sendLineBotMessage(log);
             sendTelegramMessage(log);
             sendDiscordMessage(log);
             sendGasWebhook(log);
           }
-
-          pruneLogs(false);
-          saveLogs();
         }
         device.lastStatusChange = now;
       }
@@ -4370,15 +4525,73 @@ async function monitoringLoop() {
   setTimeout(monitoringLoop, intervalSec * 1000);
 }
 
+// --- 7-DAY ROLLING DAILY AUTO-BACKUP & MORNING ARP CACHE FLUSH ---
+let lastDailyBackupDate = '';
+let lastMorningArpFlushDate = '';
+
+function runDailyAutoBackup() {
+  try {
+    const bkk = getBangkokTimeInfo();
+    if (!bkk.dateStr || lastDailyBackupDate === bkk.dateStr) return;
+
+    const backupDir = path.join(process.cwd(), '.backup_data');
+    if (!fs.existsSync(backupDir)) {
+      fs.mkdirSync(backupDir, { recursive: true });
+    }
+
+    const devicesBackupPath = path.join(backupDir, `devices-${bkk.dateStr}.json`);
+    const settingsBackupPath = path.join(backupDir, `settings-${bkk.dateStr}.json`);
+    writeJsonAtomicSync(devicesBackupPath, devices);
+    writeJsonAtomicSync(settingsBackupPath, settings);
+    lastDailyBackupDate = bkk.dateStr;
+
+    // Keep only the latest 7 daily backups
+    const cleanupPrefix = (prefix: string) => {
+      const files = fs
+        .readdirSync(backupDir)
+        .filter((f) => f.startsWith(prefix) && f.endsWith('.json'))
+        .sort()
+        .reverse();
+      files.slice(7).forEach((oldFile) => {
+        try {
+          fs.unlinkSync(path.join(backupDir, oldFile));
+        } catch (_e) {}
+      });
+    };
+    cleanupPrefix('devices-');
+    cleanupPrefix('settings-');
+    console.log(`[Auto-Backup] Saved 7-day rolling snapshot for ${bkk.dateStr}`);
+  } catch (e) {
+    console.error('[Auto-Backup] Failed to write daily snapshot:', e);
+  }
+}
+
+// Run initial snapshot on startup
+setTimeout(runDailyAutoBackup, 3000);
+
 // Dedicated 15s scheduler & Auto-ARP sweep loop:
 // - Sweeps 10.80.80.1 - 10.80.80.254 in background when any E-Board is offline so newly powered-on E-Boards are detected automatically by MAC
 // - Checks scheduled LINE/PDF reports on the exact minute
+// - Runs 7-day rolling auto-backup and 05:30 morning ARP refresh
 let lastPruneCheckMs = Date.now();
 let lastArpSweepMs = 0;
 setInterval(async () => {
   try {
     await checkScheduledReports();
     await checkScheduledLineSummary();
+    runDailyAutoBackup();
+
+    const bkk = getBangkokTimeInfo();
+    if (bkk.timeStr === '05:30' && lastMorningArpFlushDate !== bkk.dateStr) {
+      lastMorningArpFlushDate = bkk.dateStr;
+      if (process.platform === 'win32') {
+        try {
+          execSync('arp -d *', { stdio: 'ignore', timeout: 5000 });
+          console.log('[Morning Maintenance] Flushed stale Windows ARP cache at 05:30.');
+        } catch (_e) {}
+      }
+      runBackgroundSchoolArpSweep().catch(() => {});
+    }
 
     const hasOfflineDevices = devices.some(d => d.isMonitored && !d.isMaintenance && d.status === DeviceStatus.OFFLINE);
     const sweepIntervalMs = hasOfflineDevices ? 15000 : 45000;

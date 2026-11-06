@@ -649,11 +649,12 @@ export const Settings: React.FC<SettingsProps> = ({ settings, devices, onSave, o
   const [unlockedPin, setUnlockedPin] = useState<string>(() => sessionStorage.getItem('netsentinel_admin_pin') || '');
   const [gitRepoUrl, setGitRepoUrl] = useState<string>('https://github.com/suphol4726/eboard-monitor.git');
   const [gitLastCommit, setGitLastCommit] = useState<string>('');
+  const [dailyBackupsInfo, setDailyBackupsInfo] = useState<{ count: number; latest: string }>({ count: 0, latest: '' });
   const [isSelfUpdating, setIsSelfUpdating] = useState<boolean>(false);
   const [copiedCmd, setCopiedCmd] = useState<boolean>(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const windowsOneLinerCmd = `cd /d C:\\eboard-monitor && (if exist "C:\\Program Files\\Git\\cmd\\git.exe" set "PATH=%PATH%;C:\\Program Files\\Git\\cmd") && (if not exist .backup_data mkdir .backup_data) && (if exist devices.json copy /Y devices.json .backup_data\\devices.json.bak >nul) && (if exist settings.json copy /Y settings.json .backup_data\\settings.json.bak >nul) && (if exist logs.json copy /Y logs.json .backup_data\\logs.json.bak >nul) && call pm2 stop eboard-monitor & (for /f "tokens=5" %a in ('netstat -aon ^| findstr ":3000" ^| findstr "LISTENING"') do taskkill /F /PID %a) & (if not exist .git (git init && git remote add origin https://github.com/suphol4726/eboard-monitor.git) else (git remote set-url origin https://github.com/suphol4726/eboard-monitor.git)) && git fetch --all && git reset --hard origin/main && (if exist .backup_data\\devices.json.bak copy /Y .backup_data\\devices.json.bak devices.json >nul) && (if exist .backup_data\\settings.json.bak copy /Y .backup_data\\settings.json.bak settings.json >nul) && (if exist .backup_data\\logs.json.bak copy /Y .backup_data\\logs.json.bak logs.json >nul) && (if exist dist\\server.cjs del /F /Q dist\\server.cjs) && call npm run build && call pm2 delete eboard-monitor & call pm2 start dist/server.cjs --name eboard-monitor && call pm2 save`;
+  const windowsOneLinerCmd = `cd /d C:\\eboard-monitor && (if exist "C:\\Program Files\\Git\\cmd\\git.exe" set "PATH=%PATH%;C:\\Program Files\\Git\\cmd") && (if not exist .backup_data mkdir .backup_data) && (if exist devices.json copy /Y devices.json .backup_data\\devices.json.bak >nul) && (if exist settings.json copy /Y settings.json .backup_data\\settings.json.bak >nul) && (if exist logs.json copy /Y logs.json .backup_data\\logs.json.bak >nul) && call pm2 stop eboard-monitor & (for /f "tokens=5" %a in ('netstat -aon ^| findstr ":3000" ^| findstr "LISTENING"') do taskkill /F /PID %a) & (if not exist .git (git init && git remote add origin https://github.com/suphol4726/eboard-monitor.git) else (git remote set-url origin https://github.com/suphol4726/eboard-monitor.git)) && git fetch --all && git reset --hard origin/main && (if exist .backup_data\\devices.json.bak copy /Y .backup_data\\devices.json.bak devices.json >nul) && (if exist .backup_data\\settings.json.bak copy /Y .backup_data\\settings.json.bak settings.json >nul) && (if exist .backup_data\\logs.json.bak copy /Y .backup_data\\logs.json.bak logs.json >nul) && (if exist dist\\server.cjs del /F /Q dist\\server.cjs) && call npm run build && call pm2 delete eboard-monitor & call pm2 start dist/server.cjs --name eboard-monitor --max-memory-restart 400M && call pm2 save`;
 
   const handleCopyUnlockCmd = () => {
     navigator.clipboard.writeText(windowsOneLinerCmd);
@@ -669,6 +670,9 @@ export const Settings: React.FC<SettingsProps> = ({ settings, devices, onSave, o
         const data = await res.json();
         if (data.remoteUrl) setGitRepoUrl(data.remoteUrl);
         if (data.lastCommit) setGitLastCommit(data.lastCommit);
+        if (typeof data.dailyBackupsCount === 'number') {
+          setDailyBackupsInfo({ count: data.dailyBackupsCount, latest: data.latestDailyBackup || '' });
+        }
       }
     } catch (_e) {}
   };
@@ -2068,11 +2072,18 @@ export const Settings: React.FC<SettingsProps> = ({ settings, devices, onSave, o
                     </button>
                   </div>
                 </div>
-                {gitLastCommit && (
-                  <p className="text-xs text-slate-500 dark:text-slate-400 font-mono">
-                    เวอร์ชัน Git ล่าสุดบนเครื่อง: {gitLastCommit}
-                  </p>
-                )}
+                <div className="flex flex-wrap items-center gap-3">
+                  {gitLastCommit && (
+                    <p className="text-xs text-slate-500 dark:text-slate-400 font-mono">
+                      เวอร์ชัน Git ล่าสุดบนเครื่อง: {gitLastCommit}
+                    </p>
+                  )}
+                  {dailyBackupsInfo.count > 0 && (
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-700 dark:text-emerald-400 text-xs font-bold">
+                      สำรองข้อมูลรายวันอัตโนมัติ: {dailyBackupsInfo.count}/7 วัน (ล่าสุด {dailyBackupsInfo.latest})
+                    </span>
+                  )}
+                </div>
                 <div className="text-xs text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-900/60 p-3.5 rounded-xl border border-slate-200/70 dark:border-slate-800 space-y-2">
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                     <p className="font-bold text-slate-700 dark:text-slate-300">วิธีใช้งานให้ซิงก์จาก AI Studio ลงเครื่องจริงไวที่สุด:</p>

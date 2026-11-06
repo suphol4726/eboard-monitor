@@ -60,9 +60,9 @@ if exist ".backup_data\devices.json.bak" copy /Y ".backup_data\devices.json.bak"
 if exist ".backup_data\settings.json.bak" copy /Y ".backup_data\settings.json.bak" "settings.json" >nul
 if exist ".backup_data\logs.json.bak" copy /Y ".backup_data\logs.json.bak" "logs.json" >nul
 
-echo [5/5] กำลังเริ่มการทำงาน PM2 (eboard-monitor) ใหม่...
+echo [5/5] กำลังเริ่มการทำงาน PM2 (eboard-monitor พร้อมระบบคืนค่า RAM อัตโนมัติ 400MB)...
 call pm2 delete eboard-monitor >nul 2>&1
-call pm2 start dist/server.cjs --name eboard-monitor
+call pm2 start dist/server.cjs --name eboard-monitor --max-memory-restart 400M
 call pm2 save
 
 echo.

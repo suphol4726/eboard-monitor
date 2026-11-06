@@ -895,7 +895,7 @@ const App: React.FC = () => {
       )}
 
       {activeTab === 'history' && (
-        <HistoryView logs={logs} devices={devices} settings={settings} />
+        <HistoryView logs={logs} devices={devices} settings={settings} onSyncLogs={setLogs} />
       )}
 
       {activeTab === 'settings' && (
