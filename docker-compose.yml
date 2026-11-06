@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  netsentinel:
+    build: .
+    container_name: netsentinel-monitor
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+    volumes:
+      - ./data:/app/data
+      - ./reports:/app/reports
+    network_mode: "host" # Allows ICMP ping & local ARP resolution on host network

@@ -1,0 +1,6 @@
+{
+  "name": "E-Board - IP Monitoring System",
+  "description": "System monitoring and network status platform with E-Board branding, real-time latency checks, floor plan topology mapping, auto subnet scanner, and multi-channel notifications (LINE, Teams Webhook, Telegram, Discord).",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

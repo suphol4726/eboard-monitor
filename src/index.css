@@ -1,0 +1,68 @@
+@import "tailwindcss";
+@config "../tailwind.config.js";
+
+@layer base {
+  :root {
+    --font-sans: "Kanit", ui-sans-serif, system-ui, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+    font-size: 15px;
+  }
+  
+  /* Mobile-first compact typography scaling */
+  @media (max-width: 768px) {
+    html {
+      font-size: 13.5px;
+    }
+  }
+
+  @media (min-width: 1280px) {
+    html {
+      font-size: 15.5px;
+    }
+  }
+
+  body {
+    font-family: 'Kanit', sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+}
+
+@keyframes pingEqualizer {
+  0% {
+    transform: scaleY(0.28);
+    opacity: 0.45;
+  }
+  30% {
+    transform: scaleY(1.05);
+    opacity: 1;
+  }
+  60% {
+    transform: scaleY(0.45);
+    opacity: 0.65;
+  }
+  80% {
+    transform: scaleY(0.9);
+    opacity: 0.95;
+  }
+  100% {
+    transform: scaleY(0.28);
+    opacity: 0.45;
+  }
+}
+
+@keyframes pingGlowPulse {
+  0%, 100% {
+    opacity: 0.85;
+    filter: drop-shadow(0 0 1px currentColor);
+  }
+  50% {
+    opacity: 1;
+    filter: drop-shadow(0 0 6px currentColor);
+  }
+}
+
+.animate-ping-bar {
+  transform-origin: bottom;
+  will-change: transform, opacity;
+}
